@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>FPL Analyser | Data Driven FPL</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0c0b09">
+<script>
+  // Apply the saved theme before first paint to avoid a flash.
+  //
+  // Must stay in step with src/lib/theme.tsx — if this picks a different
+  // starting theme from the one React settles on, the page paints one and
+  // then snaps to the other, which is worse than no script at all.
+  //
+  // Dark is the default, and the OS preference is deliberately not consulted:
+  // the gold reads on dark the way the site was designed, and it is the theme
+  // every shared image and screenshot is in. A visitor arriving from one of
+  // those should see the thing they clicked. Light stays one tap away.
+  (function () {
+    try {
+      var root = document.documentElement;
+      var accent = 'aurum';
+      // Light is withdrawn while the design settles — see MODES in lib/theme.
+      // This must stay in step with initialMode() or a visitor who had chosen
+      // light gets a flash of it on every cold load.
+      var mode = 'dark';
+      root.dataset.accent = accent;
+      root.dataset.mode = mode;
+    } catch (e) {
+      document.documentElement.dataset.accent = 'aurum';
+      document.documentElement.dataset.mode = 'dark';
+    }
+  })();
+</script>
+<script>
+  // 1) Purge the pre-migration service worker and its caches. A zombie legacy
+  //    worker (script now deleted → 404 on update checks) can fall back to the
+  //    OLD cached shell on a slow network, whose js/ files no longer exist —
+  //    a broken page until refresh. Kill it and its 'fpl-analyser-*' caches.
+  (function () {
+    try {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          regs.forEach(function (reg) {
+            var sw = reg.active || reg.waiting || reg.installing;
+            if (sw && /service-worker\.js/.test(sw.scriptURL)) reg.unregister();
+          });
+        }).catch(function () {});
+      }
+      if (window.caches && caches.keys) {
+        caches.keys().then(function (keys) {
+          keys.forEach(function (k) { if (k.indexOf('fpl-analyser-') === 0) caches.delete(k); });
+        }).catch(function () {});
+      }
+    } catch (e) { /* best effort */ }
+  })();
+
+  // Collect runtime errors from the very start so the #/debug page can show
+  // them even when they happen before React mounts.
+  (function () {
+    window.__errlog = [];
+    function log(kind, msg) {
+      if (window.__errlog.length < 30) window.__errlog.push(new Date().toISOString().slice(11, 19) + ' [' + kind + '] ' + msg);
+    }
+    window.addEventListener('error', function (e) {
+      log('error', (e.message || 'unknown') + (e.filename ? ' @ ' + e.filename.split('/').pop() + ':' + e.lineno : ''));
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e.reason; log('promise', (r && (r.message || String(r))) || 'unknown');
+    });
+  })();
+
+  // 1b) A blank page must never be silent. If the app has not mounted a few
+  //     seconds after load, put the collected errors ON SCREEN — the reader's
+  //     screen, which is the only place the failure is visible. A phone that
+  //     renders nothing gives its owner no way to tell anyone WHY, and a bug
+  //     nobody can describe is a bug nobody can fix.
+  //
+  //     Deliberately ES5 with no template literals, arrow functions or
+  //     optional chaining: this is the code that has to survive an engine too
+  //     old to parse the bundle, which is one of the things it exists to
+  //     report.
+  (function () {
+    var shown = false;
+    function report() {
+      if (shown) return;
+      var root = document.getElementById('root');
+      if (!root || root.childElementCount > 0) return;   // it mounted; nothing to say
+      shown = true;
+      var errs = (window.__errlog || []);
+      var html = '<div style="max-width:38rem;margin:0 auto;padding:24px 18px;'
+        + 'font:15px/1.6 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:#eef0f4">'
+        + '<h1 style="font-size:19px;margin:0 0 8px">This page did not start</h1>'
+        + '<p style="color:#a8acb3;margin:0 0 16px">The site loaded but the app failed to run on this device. '
+        + 'The detail below is what went wrong \u2014 a screenshot of it is enough to fix the cause.</p>';
+      if (errs.length) {
+        html += '<pre style="white-space:pre-wrap;word-break:break-word;background:#131519;border:1px solid #2a2d33;'
+          + 'border-radius:10px;padding:12px;font-size:12px;color:#e8907f;margin:0 0 16px">'
+          + errs.join('\n').replace(/[<>&]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]; })
+          + '</pre>';
+      } else {
+        html += '<p style="color:#a8acb3;margin:0 0 16px">No script error was recorded, which usually means the '
+          + 'browser could not parse the app at all.</p>';
+      }
+      html += '<pre style="white-space:pre-wrap;word-break:break-word;background:#131519;border:1px solid #2a2d33;'
+        + 'border-radius:10px;padding:12px;font-size:11px;color:#7e838b;margin:0 0 16px">'
+        + navigator.userAgent + '\n' + location.href + '</pre>'
+        + '<button id="__wipe" style="min-height:44px;padding:0 16px;border-radius:999px;border:1px solid #c9a227;'
+        + 'background:transparent;color:#ead188;font:600 15px system-ui">Clear this site and reload</button></div>';
+      root.innerHTML = html;
+      var b = document.getElementById('__wipe');
+      if (b) b.onclick = function () {
+        try {
+          if (window.caches && caches.keys) caches.keys().then(function (k) { k.forEach(function (n) { caches.delete(n); }); });
+          if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistrations().then(function (r) {
+            r.forEach(function (x) { x.unregister(); });
+            setTimeout(function () { location.reload(); }, 300);
+          }); else location.reload();
+        } catch (e) { location.reload(); }
+      };
+    }
+    if (window.addEventListener) {
+      window.addEventListener('load', function () { setTimeout(report, 6000); });
+      // Belt and braces: `load` never fires if a resource hangs.
+      setTimeout(report, 12000);
+    }
+  })();
+
+  // 2) Start the core data downloads NOW, during HTML parse — the app's data
+  //    layer picks these promises up, cutting the JS-download-then-fetch chain
+  //    out of the critical path (worth seconds on a phone connection).
+  (function () {
+    try {
+      // Data is namespaced by season (site_data/<season>/…). Resolve the active
+      // season synchronously so the eager fetches hit the right folder. Default
+      // is the season current at build time; a stored choice overrides it, and
+      // switching seasons reloads the page. (Update the default at rollover.)
+      var season = '2026-27';
+      try { var stored = localStorage.getItem('fpl_season'); if (stored) season = stored; } catch (e) {}
+      window.__season = season;
+      window.__early = {};
+      [
+        'ratings', 'personas_4gw', 'advanced_metrics', 'team_metrics',
+        'season_to_date', 'player_tiers', 'fixture_ease', 'meta',
+        'benchmarks', 'replacement_pool', 'persona_shifts', 'price_risk', 'player_form', 'teams'
+      ].forEach(function (n) {
+        window.__early[n] = fetch('site_data/' + season + '/' + n + '.json');
+        window.__early[n].catch(function () {}); // avoid unhandled-rejection noise
+      });
+    } catch (e) { /* the data layer falls back to its own fetches */ }
+  })();
+</script>
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FPL Analyser">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<!-- Tab-sized icons, listed smallest first. Without these the browser had to
+     shrink the 192px launcher icon into a ~16px tab, and that icon carries a
+     wide margin for the launcher's sake — so the monogram arrived tiny. -->
+<link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="48x48" href="icons/favicon-48.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+
+<!-- One address for the site. The hash routes are fragments and never reach a
+     server, and the github.io mirror already 301s here because of the CNAME —
+     so the case this covers is a shared link coming back with ?utm_source= or
+     ?fbclid= on it, which is otherwise a separate URL to a crawler. -->
+<link rel="canonical" href="https://fplanalyser.co.uk/">
+<meta name="description" content="Every Premier League player rated 0–100 on the numbers that predict Fantasy Premier League returns — expected goals, minutes, form and fixtures — then turned into transfer calls for your own team.">
+
+<!-- Link preview. The full lockup is the card: when someone posts the site
+     itself rather than an exported panel, this is the image that travels.
+     og:image and og:url MUST be absolute — every scraper (X, Facebook,
+     WhatsApp, iMessage, Slack) fetches the page without a document base and
+     silently drops a relative path, so a relative one means no preview image
+     at all. Everything else on the site uses a relative base for the Pages
+     sub-path; these two are the deliberate exception. -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="FPL Analyser">
+<meta property="og:url" content="https://fplanalyser.co.uk/">
+<meta property="og:title" content="FPL Analyser — Data. Insight. Points.">
+<meta property="og:description" content="Every Premier League player rated on the numbers that predict returns — then turned into transfer calls for your own team.">
+<meta property="og:image" content="https://fplanalyser.co.uk/brand/lockup.jpg">
+<meta property="og:image:alt" content="FPL Analyser — Data. Insight. Points.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:site" content="@FPLAnalyser">
+<meta name="twitter:title" content="FPL Analyser — Data. Insight. Points.">
+<meta name="twitter:description" content="Every Premier League player rated on the numbers that predict returns — then turned into transfer calls for your own team.">
+<meta name="twitter:image" content="https://fplanalyser.co.uk/brand/lockup.jpg">
+  <script type="module" crossorigin src="./assets/index-DStDviX5.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-DxYuAekM.css">
+</head>
+<body>
+
+<!-- Icon sprite (Lucide-style, stroke inherits currentColor via .icon) + shared gradient defs -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="grad-brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#34E0AD"/>
+      <stop offset="100%" stop-color="#24B8D6"/>
+    </linearGradient>
+  </defs>
+  <symbol id="i-flame" viewBox="0 0 24 24"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></symbol>
+  <symbol id="i-snow" viewBox="0 0 24 24"><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/><path d="m20 16-4-4 4-4"/><path d="m4 8 4 4-4 4"/><path d="m16 4-4 4-4-4"/><path d="m8 20 4-4 4 4"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 2.5l2.94 5.95 6.57.96-4.76 4.63 1.13 6.54L12 17.5l-5.88 3.08 1.13-6.54-4.76-4.63 6.57-.96z"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+  <symbol id="i-hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></symbol>
+  <symbol id="i-ball" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 7.5l4.28 3.11-1.63 5.03H9.35l-1.63-5.03z"/><path d="M12 2v5.5M16.28 10.61 22 8.5M14.65 15.64l3.35 4.86M9.35 15.64 6 20.5M7.72 10.61 2 8.5"/></symbol>
+  <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18"/><path d="M7 6h1v4"/><path d="m16.71 13.88.7.71-2.82 2.82"/></symbol>
+  <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></symbol>
+  <symbol id="i-trend-up" viewBox="0 0 24 24"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></symbol>
+  <symbol id="i-trend-down" viewBox="0 0 24 24"><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+  <symbol id="i-pitch" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="12" y1="5" x2="12" y2="19"/><circle cx="12" cy="12" r="2.5"/></symbol>
+  <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></symbol>
+  <symbol id="i-crown" viewBox="0 0 24 24"><path d="M2 6.5l4.3 3.7a1 1 0 0 0 1.52-.29L12 3.5l4.18 6.41a1 1 0 0 0 1.52.29L22 6.5l-2.5 11a1 1 0 0 1-.98.78H5.48a1 1 0 0 1-.98-.78z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+  <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="M15 5 8 12l7 7"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M4 12h15"/><path d="M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.1-6.4L3 9.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.7a1 1 0 0 0 .8-.4l1-1.3a1 1 0 0 1 .8-.3h4.4a1 1 0 0 1 .8.3l1 1.3a1 1 0 0 0 .8.4h1.7A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/><circle cx="12" cy="12.5" r="3.6"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20h4L20 8a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M14.5 5.5 18.5 9.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/></symbol>
+</svg>
+
+<div id="root"></div>
+</body>
+</html>
