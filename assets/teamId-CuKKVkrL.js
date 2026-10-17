@@ -1,0 +1,1 @@
+const e="fpl_team_id",a=t=>/^\d+$/.test(t.trim());function r(){try{return localStorage.getItem(e)??""}catch{return""}}function c(t){try{localStorage.setItem(e,t.trim())}catch{}}export{a as i,r,c as s};
