@@ -1,0 +1,15 @@
+{
+  "current": "2026-27",
+  "seasons": [
+    {
+      "id": "2026-27",
+      "label": "2026/27",
+      "provisional": false,
+      "ratings_season": "2025-26"
+    },
+    {
+      "id": "2025-26",
+      "label": "2025/26"
+    }
+  ]
+}
